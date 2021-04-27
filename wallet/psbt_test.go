@@ -321,6 +321,95 @@ func containsUtxo(list []wire.OutPoint, candidate wire.OutPoint) bool {
 	return false
 }
 
+// TestSignPsbt tests signing of a given PSBT packet
+func TestSignPsbt(t *testing.T) {
+	w, cleanup := testWallet(t)
+	defer cleanup()
+
+	// Create a P2WKH address we can use to send some coins to.
+	addr, err := w.CurrentAddress(0, waddrmgr.KeyScopeBIP0084)
+	if err != nil {
+		t.Fatalf("unable to get current address: %v", addr)
+	}
+	p2wkhAddr, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("unable to convert wallet address to p2wkh: %v", err)
+	}
+
+	// Also create a nested P2WKH address we can send coins to.
+	addr, err = w.CurrentAddress(0, waddrmgr.KeyScopeBIP0049Plus)
+	if err != nil {
+		t.Fatalf("unable to get current address: %v", addr)
+	}
+	np2wkhAddr, err := txscript.PayToAddrScript(addr)
+	if err != nil {
+		t.Fatalf("unable to convert wallet address to np2wkh: %v", err)
+	}
+
+	// Register two big UTXO that will be used when funding the PSBT.
+	utxOutP2WKH := wire.NewTxOut(1000000, p2wkhAddr)
+	utxOutNP2WKH := wire.NewTxOut(1000000, np2wkhAddr)
+	incomingTx := &wire.MsgTx{
+		TxIn:  []*wire.TxIn{{}},
+		TxOut: []*wire.TxOut{utxOutP2WKH, utxOutNP2WKH},
+	}
+	addUtxo(t, w, incomingTx)
+
+	// Create the packet that we want to sign.
+	packet := &psbt.Packet{
+		UnsignedTx: &wire.MsgTx{
+			TxIn: []*wire.TxIn{{
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  incomingTx.TxHash(),
+					Index: 0,
+				},
+			}, {
+				PreviousOutPoint: wire.OutPoint{
+					Hash:  incomingTx.TxHash(),
+					Index: 1,
+				},
+			}},
+			TxOut: []*wire.TxOut{{
+				PkScript: testScriptP2WKH,
+				Value:    50000,
+			}, {
+				PkScript: testScriptP2WSH,
+				Value:    100000,
+			}, {
+				PkScript: testScriptP2WKH,
+				Value:    849632,
+			}},
+		},
+		Inputs: []psbt.PInput{{
+			WitnessUtxo: utxOutP2WKH,
+			SighashType: txscript.SigHashAll,
+		}, {
+			NonWitnessUtxo: incomingTx,
+			SighashType:    txscript.SigHashAll,
+		}},
+		Outputs: []psbt.POutput{{}, {}, {}},
+	}
+
+	// Finalize it to add all witness data then extract the final TX.
+	err = w.SignPsbt(nil, 0, packet)
+	if err != nil {
+		t.Fatalf("error finalizing PSBT packet: %v", err)
+	}
+	finalTx, err := psbt.Extract(packet)
+	if err != nil {
+		t.Fatalf("error extracting final TX from PSBT: %v", err)
+	}
+
+	// Finally verify that the created witness is valid.
+	err = validateMsgTx(
+		finalTx, [][]byte{utxOutP2WKH.PkScript, utxOutNP2WKH.PkScript},
+		[]btcutil.Amount{1000000, 1000000},
+	)
+	if err != nil {
+		t.Fatalf("error validating tx: %v", err)
+	}
+}
+
 // TestFinalizePsbt tests that a given PSBT packet can be finalized.
 func TestFinalizePsbt(t *testing.T) {
 	w, cleanup := testWallet(t)

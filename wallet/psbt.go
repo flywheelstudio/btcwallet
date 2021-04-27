@@ -246,17 +246,11 @@ func (w *Wallet) FundPsbt(packet *psbt.Packet, keyScope *waddrmgr.KeyScope,
 	return changeIndex, nil
 }
 
-// FinalizePsbt expects a partial transaction with all inputs and outputs fully
-// declared and tries to sign all inputs that belong to the wallet. Our wallet
-// must be the last signer of the transaction. That means, if there are any
-// unsigned non-witness inputs or inputs without UTXO information attached or
-// inputs without witness data that do not belong to the wallet, this method
-// will fail. If no error is returned, the PSBT is ready to be extracted and the
-// final TX within to be broadcast.
+// SignPsbt expects a partial transaction and tries to sign all inputs that
+// belong to the wallet. The method modifies PSBT `packet` in place.
 //
-// NOTE: This method does NOT publish the transaction after it's been finalized
-// successfully.
-func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
+// NOTE: This method does NOT publish the transaction
+func (w *Wallet) SignPsbt(keyScope *waddrmgr.KeyScope, account uint32,
 	packet *psbt.Packet) error {
 
 	// Let's check that this is actually something we can and want to sign.
@@ -267,23 +261,14 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 	}
 
 	// Go through each input that doesn't have final witness data attached
-	// to it already and try to sign it. We do expect that we're the last
-	// ones to sign. If there is any input without witness data that we
-	// cannot sign because it's not our UTXO, this will be a hard failure.
+	// to it already and try to sign it.
 	tx := packet.UnsignedTx
 	sigHashes := txscript.NewTxSigHashes(tx)
 	for idx, txIn := range tx.TxIn {
 		in := packet.Inputs[idx]
 
-		// We can only sign if we have UTXO information available. We
-		// can just continue here as a later step will fail with a more
-		// precise error message.
-		if in.WitnessUtxo == nil && in.NonWitnessUtxo == nil {
-			continue
-		}
-
-		// Skip this input if it's got final witness data attached.
-		if len(in.FinalScriptWitness) > 0 {
+		// Skip this input if it has been signed already.
+		if len(in.FinalScriptWitness) > 0 || len(in.FinalScriptSig) > 0 {
 			continue
 		}
 
@@ -379,9 +364,30 @@ func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		packet.Inputs[idx].FinalScriptSig = sigScript
 	}
 
+	return nil
+}
+
+// FinalizePsbt expects a partial transaction with all inputs and outputs fully
+// declared and tries to sign all inputs that belong to the wallet. Our wallet
+// must be the last signer of the transaction. That means, if there are any
+// unsigned non-witness inputs or inputs without UTXO information attached or
+// inputs without witness data that do not belong to the wallet, this method
+// will fail. If no error is returned, the PSBT is ready to be extracted and the
+// final TX within to be broadcast.
+//
+// NOTE: This method does NOT publish the transaction after it's been finalized
+// successfully.
+func (w *Wallet) FinalizePsbt(keyScope *waddrmgr.KeyScope, account uint32,
+	packet *psbt.Packet) error {
+
+	w.SignPsbt(keyScope, account, packet)
+
+	// We do expect that we're the last ones to sign. If there is any input
+	// without witness data that we cannot sign because it's not our UTXO, this
+	// will be a hard failure.
 	// Make sure the PSBT itself thinks it's finalized and ready to be
 	// broadcast.
-	err = psbt.MaybeFinalizeAll(packet)
+	err := psbt.MaybeFinalizeAll(packet)
 	if err != nil {
 		return fmt.Errorf("error finalizing PSBT: %v", err)
 	}
