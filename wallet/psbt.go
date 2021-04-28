@@ -275,7 +275,7 @@ func (w *Wallet) SignPsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		// We can only sign this input if it's ours, so we try to map it
 		// to a coin we own. If we can't, then we'll continue as it
 		// isn't our input.
-		fullTx, txOut, _, _, err := w.FetchInputInfo(
+		fullTx, txOut, derivationPath, _, err := w.FetchInputInfo(
 			&txIn.PreviousOutPoint,
 		)
 		if err != nil {
@@ -285,10 +285,9 @@ func (w *Wallet) SignPsbt(keyScope *waddrmgr.KeyScope, account uint32,
 		// Find out what UTXO we are signing. Wallets _should_ always
 		// provide the full non-witness UTXO for segwit v0.
 		var signOutput *wire.TxOut
+		prevIndex := txIn.PreviousOutPoint.Index
 		if in.NonWitnessUtxo != nil {
-			prevIndex := txIn.PreviousOutPoint.Index
 			signOutput = in.NonWitnessUtxo.TxOut[prevIndex]
-
 			if !psbt.TxOutsEqual(txOut, signOutput) {
 				return fmt.Errorf("found UTXO %#v but it "+
 					"doesn't match PSBT's input %v", txOut,
@@ -301,6 +300,9 @@ func (w *Wallet) SignPsbt(keyScope *waddrmgr.KeyScope, account uint32,
 					fullTx.TxHash(),
 					txIn.PreviousOutPoint.Hash)
 			}
+		} else {
+			in.NonWitnessUtxo = fullTx
+			signOutput = in.NonWitnessUtxo.TxOut[prevIndex]
 		}
 
 		// Fall back to witness UTXO only for older wallets.
@@ -312,6 +314,30 @@ func (w *Wallet) SignPsbt(keyScope *waddrmgr.KeyScope, account uint32,
 					"doesn't match PSBT's input %v", txOut,
 					signOutput)
 			}
+		} else {
+			in.WitnessUtxo = &wire.TxOut{
+				Value:    txOut.Value,
+				PkScript: txOut.PkScript,
+			}
+			signOutput = in.WitnessUtxo
+		}
+
+		in.SighashType = txscript.SigHashAll
+
+		in.Bip32Derivation = []*psbt.Bip32Derivation{
+			derivationPath,
+		}
+
+		// For nested P2WKH we need to add the redeem script to
+		// the input, otherwise an offline wallet won't be able
+		// to sign for it. For normal P2WKH this will be nil.
+		addr, witnessProgram, _, err := w.scriptForOutput(txOut)
+		if err != nil {
+			return fmt.Errorf("error fetching UTXO "+
+				"script: %v", err)
+		}
+		if addr.AddrType() == waddrmgr.NestedWitnessPubKey {
+			in.RedeemScript = witnessProgram
 		}
 
 		// Finally, if the input doesn't belong to a watch-only account,
